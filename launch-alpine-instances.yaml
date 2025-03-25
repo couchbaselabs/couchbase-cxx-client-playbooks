@@ -1,0 +1,69 @@
+---
+- name: Launch EC2 instance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_region: "us-west-2"
+    # the private key is expected to be at "~/.ssh/{{ key_name }}.pem" on the local machine
+    key_name: "INSERT_NAME_OF_YOUR_EC2_KEYPAIR"
+    subnet_id: "INSERT_NAME_OF_EC2_SUBNET"
+    # initials to identify builders in AWS Console, e.g. "sa" for Sergey Avseyev
+    label_initials: "INSERT_YOUR_INITIALS_TO_MARK_THE_BUILDERS"
+    wait_timeout: 300
+
+  tasks:
+    - name: Launch EC2 instance
+      ec2_instance:
+        key_name: "{{ key_name }}"
+        instance_type: "{{ item.instance_type }}"
+        image_id: "{{ item.ami_id }}"
+        region: "{{ aws_region }}"
+        wait: true
+        state: running
+        count: 1
+        vpc_subnet_id: "{{ subnet_id }}"
+        tags:
+          Name: "{{ item.label }}"
+          Release: "{{ item.release }}"
+        volumes:
+          - device_name: "/dev/sdb"
+            ebs:
+              volume_size: 40  # specify the desired ebs volume size in gb
+              delete_on_termination: true  # specify if the volume should be deleted when the instance is terminated
+      loop:
+        # https://www.alpinelinux.org/cloud/ ( x86_64 • bios • cloudinit • vm )
+        - { ami_id: 'ami-0e54d05c4120738b6', instance_type: 't2.2xlarge', label: '{{ label_initials }}-x86_64-apk-3.20', release: 'alpine-3.20' }
+        - { ami_id: 'ami-0c03cd4d767662e23', instance_type: 't2.2xlarge', label: '{{ label_initials }}-x86_64-apk-3.19', release: 'alpine-3.19' }
+        # https://www.alpinelinux.org/cloud/ (  aarch64 • uefi • cloudinit • vm )
+        - { ami_id: 'ami-08021509b0a2e8393', instance_type: 't4g.2xlarge', label: '{{ label_initials }}-aarch64-apk-3.20', release: 'alpine-3.20' }
+        - { ami_id: 'ami-0a0d01b07f9576906', instance_type: 't4g.2xlarge', label: '{{ label_initials }}-aarch64-apk-3.19', release: 'alpine-3.19' }
+      register: ec2_instances
+
+    - name: Write instances to hosts.ini
+      block:
+        - name: Create the [alpine] group in hosts.ini
+          lineinfile:
+            path: "hosts.ini"
+            line: "[alpine]"
+            create: yes
+            state: present
+
+        - name: Append each instance to hosts.ini
+          lineinfile:
+            path: "hosts.ini"
+            line: "{{ item.public_dns_name }} release={{ item.tags.Release }} label={{ item.tags.Name }} ansible_user=alpine ansible_ssh_private_key_file=~/.ssh/{{ key_name }}.pem ansible_become_method=doas"
+            insertafter: "[alpine]"
+            create: yes
+            state: present
+          loop: "{{ ec2_instances.results | map(attribute='instances') | flatten }}"
+
+    - name: Wait for SSH to become available
+      wait_for:
+        host: "{{ item.public_dns_name }}"
+        port: 22
+        state: started
+        timeout: "{{ wait_timeout }}"
+      loop: "{{ ec2_instances.results | map(attribute='instances') | flatten }}"
+      register: ssh_results

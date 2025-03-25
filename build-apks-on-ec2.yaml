@@ -1,0 +1,205 @@
+---
+- name: Ensure Python is installed
+  hosts: alpine
+  gather_facts: false  # Disable fact gathering
+  tasks:
+    - name: Install Python before gathering facts
+      raw: doas apk add --no-cache python3
+      changed_when: false
+
+- name: Update the user settings
+  hosts: alpine
+  tasks:
+    - name: Install required packages
+      become: true
+      apk:
+        name:
+          - alpine-sdk
+          - abuild-rootbld
+          - cmake
+          - ccache
+          - util-linux-login
+          - g++
+          - gcc
+          - tar
+          - sed
+          - graphviz
+          - lsblk
+          - findutils
+          - linux-headers
+          - git
+          - htop
+          - ccache
+          - mc
+          - ninja
+          - doxygen
+          - openssl-dev
+          - tree
+          - vim
+          - bash
+        state: present
+
+    - name: Add current user to abuild group
+      become: true
+      user:
+        name: "{{ ansible_user_id }}"
+        groups:
+          - abuild
+        append: yes
+
+    - name: Change shell for the user to /bin/bash
+      become: true
+      command: chsh {{ ansible_user_id }} -s /bin/bash
+
+    - name: Ensure 'set -o vi' is in .bashrc
+      lineinfile:
+        path: /home/{{ ansible_user_id }}/.bash_profile
+        line: 'set -o vi'
+        create: yes
+        state: present
+
+    - name: Configure EBS
+      become: true
+      block:
+        - name: Check if /dev/xvdb exists
+          stat:
+            path: /dev/xvdb
+          register: xvdb_status
+
+        - name: Set the device variable
+          set_fact:
+            ebs_device: "{{ '/dev/xvdb' if xvdb_status.stat.exists else '/dev/nvme1n1' }}"
+
+        - name: Format the EBS volume
+          filesystem:
+            fstype: ext4
+            dev: "{{ ebs_device }}"
+
+        - name: Create mount point
+          file:
+            dest: /home/{{ ansible_user_id }}/code
+            state: directory
+
+        - name: Mount the EBS volume
+          mount:
+            path: /home/{{ ansible_user_id }}/code
+            src: "{{ ebs_device }}"
+            fstype: ext4
+            state: mounted
+
+        - name: Ensure the mount is persistent
+          mount:
+            path: /home/{{ ansible_user_id }}/code
+            src: "{{ ebs_device }}"
+            fstype: ext4
+            state: present
+
+        - name: Change ownership of the mount point
+          file:
+            path: /home/{{ ansible_user_id }}/code
+            owner: "{{ ansible_user_id }}"
+            group: "{{ ansible_user_id }}"
+            state: directory
+
+    - name: Reset ssh connection to allow user changes to affect ansible user
+      ansible.builtin.meta:
+        reset_connection
+
+- name: Setup couchbase-cxx-client APK packaging environment
+  hosts: alpine
+  vars:
+    distribution: alpine-3.20
+    # Package signing key
+    # Expected to be at "~/packaging-keys/{{ distribution }}/{{ packaging_key }}"
+    # For example, ~/packaging-keys/alpine-3.20/alpine-3.20-deadbeef.rsa
+    packaging_key: INSERT_YOUR_ALPINE_SIGNING_KEY
+    pr: 732
+
+  tasks:
+    - name: Override ccache cache directory
+      command: >
+        ccache --set-config cache_dir=/home/{{ ansible_user_id }}/code/ccache
+
+    - name: Clone couchbase-cxx-client repository
+      git:
+        repo: https://github.com/couchbase/couchbase-cxx-client
+        dest: /home/{{ ansible_user_id }}/code/couchbase-cxx-client
+        version: 1.0.6
+
+    ## Uncomment to apply ad-hoc or emergency patch to the source repository
+
+    # - name: Fix APK scripts
+    #   block:
+    #     - name: Download patch
+    #       get_url:
+    #         url: https://github.com/couchbase/couchbase-cxx-client/pull/{{ pr }}.diff
+    #         dest: /home/{{ ansible_user_id }}/{{ pr }}.diff
+    #
+    #     - name: Apply patch
+    #       command: git apply /home/{{ ansible_user_id }}/{{ pr }}.diff
+    #       args:
+    #         chdir: /home/{{ ansible_user_id }}/code/couchbase-cxx-client
+
+    - name: Configure packaging keys
+      become: true
+      block:
+        - name: Copy private key to remote instance
+          copy:
+            src: "{{ lookup('env', 'HOME') }}/packaging-keys/{{ distribution }}/{{ packaging_key }}"
+            dest: "/home/{{ ansible_user_id }}/.abuild/"
+            owner: "{{ ansible_user_id }}"
+            mode: '0600'
+
+        - name: Copy public key to remote instance
+          copy:
+            src: "{{ lookup('env', 'HOME') }}/packaging-keys/{{ distribution }}/{{ packaging_key }}.pub"
+            dest: "{{ item }}"
+            owner: root
+            mode: '0644'
+          loop:
+            - "/etc/apk/keys/"
+            - "/home/{{ ansible_user_id }}/.abuild/"
+
+        - name: Add PACKAGER_PRIVKEY line to abuild.conf
+          lineinfile:
+            path: "/home/{{ ansible_user_id }}/.abuild/abuild.conf"
+            line: 'PACKAGER_PRIVKEY="/home/{{ ansible_user_id }}/.abuild/{{ packaging_key }}"'
+            create: yes
+            state: present
+
+    - name: Fix /tmp directory
+      become: true
+      block:
+        - name: Ensure the target directory exists
+          file:
+            path: "/home/{{ ansible_user_id }}/code/tmp"
+            state: directory
+            mode: '0777'
+
+        - name: Rename existing /tmp directory
+          command: mv /tmp /tmp-old
+
+        - name: Create new /tmp symlink
+          file:
+            src: "/home/{{ ansible_user_id }}/code/tmp"
+            dest: "/tmp"
+            state: link
+            force: yes
+
+    - name: Configure build with CMake
+      command: >
+        cmake -S /home/{{ ansible_user_id }}/code/couchbase-cxx-client
+              -B /home/{{ ansible_user_id }}/code/couchbase-cxx-client/build
+              -G Ninja
+              -DCOUCHBASE_CXX_CLIENT_APK_TARGETS=ON
+              -DCOUCHBASE_CXX_CLIENT_INSTALL=ON
+              -DCOUCHBASE_CXX_CLIENT_BUILD_STATIC=OFF
+      args:
+        chdir: /home/{{ ansible_user_id }}/code/couchbase-cxx-client
+
+    - name: Build and package APK
+      command: >
+        cmake --build /home/{{ ansible_user_id }}/code/couchbase-cxx-client/build
+              --target packaging_apk
+      args:
+        chdir: /home/{{ ansible_user_id }}/code/couchbase-cxx-client

@@ -1,0 +1,64 @@
+---
+- name: Launch EC2 instance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_region: "us-west-2"
+    # the private key is expected to be at "~/.ssh/{{ key_name }}.pem" on the local machine
+    key_name: "INSERT_NAME_OF_YOUR_EC2_KEYPAIR"
+    subnet_id: "INSERT_NAME_OF_EC2_SUBNET"
+    # initials to identify builders in AWS Console, e.g. "sa" for Sergey Avseyev
+    label_initials: "INSERT_YOUR_INITIALS_TO_MARK_THE_BUILDERS"
+    wait_timeout: 300
+
+  tasks:
+    - name: Launch EC2 instance
+      ec2_instance:
+        key_name: "{{ key_name }}"
+        instance_type: "{{ item.instance_type }}"
+        image_id: "{{ item.ami_id }}"
+        region: "{{ aws_region }}"
+        wait: true
+        state: running
+        count: 1
+        vpc_subnet_id: "{{ subnet_id }}"
+        tags:
+          Name: "{{ item.label }}"
+        volumes:
+          - device_name: "/dev/sda1"
+            ebs:
+              volume_size: 40  # specify the desired ebs volume size in gb
+              delete_on_termination: true  # specify if the volume should be deleted when the instance is terminated
+      loop:
+        - { ami_id: 'ami-01a8b7cc84780badb', instance_type: 't2.2xlarge', label: '{{ label_initials }}-amd64-deb' }
+        - { ami_id: 'ami-0526d8a2a0ab17451', instance_type: 't4g.2xlarge', label: '{{ label_initials }}-arm64-deb' }
+      register: ec2_instances
+
+    - name: Write instances to hosts.ini
+      block:
+        - name: Create the [deb] group in hosts.ini
+          lineinfile:
+            path: "hosts.ini"
+            line: "[deb]"
+            create: yes
+            state: present
+
+        - name: Append each instance to hosts.ini
+          lineinfile:
+            path: "hosts.ini"
+            line: "{{ item.public_dns_name }} label={{ item.tags.Name }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/{{ key_name }}.pem"
+            insertafter: "[deb]"
+            create: yes
+            state: present
+          loop: "{{ ec2_instances.results | map(attribute='instances') | flatten }}"
+
+    - name: Wait for SSH to become available
+      wait_for:
+        host: "{{ item.public_dns_name }}"
+        port: 22
+        state: started
+        timeout: "{{ wait_timeout }}"
+      loop: "{{ ec2_instances.results | map(attribute='instances') | flatten }}"
+      register: ssh_results

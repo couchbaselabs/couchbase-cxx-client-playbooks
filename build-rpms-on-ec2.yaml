@@ -1,0 +1,88 @@
+---
+- name: Ensure Python is installed
+  hosts: rpm
+  gather_facts: false  # Disable fact gathering
+  tasks:
+    - name: Install libdnf5 python module
+      raw: sudo dnf install -y python3-libdnf5
+      changed_when: false
+
+- name: Setup couchbase-cxx-client RPM packaging environment
+  hosts: rpm
+  vars:
+    pr: 732
+  tasks:
+    - name: Install required packages
+      become: true
+      dnf:
+        name:
+          - cmake
+          - ccache
+          - g++
+          - gcc
+          - git
+          - htop
+          - mc
+          - mock
+          - ninja-build
+          - openssl-devel
+          - rpmdevtools
+          - tree
+          - vim
+        state: present
+
+    - name: Add current user to mock group
+      become: true
+      user:
+        name: "{{ ansible_user_id }}"
+        groups:
+          - mock
+        append: yes
+
+    - name: Ensure 'set -o vi' is in .bashrc
+      lineinfile:
+        path: /home/{{ ansible_user_id }}/.bashrc
+        line: 'set -o vi'
+        create: yes
+        state: present
+
+    - name: Clone couchbase-cxx-client repository
+      git:
+        repo: https://github.com/couchbase/couchbase-cxx-client
+        dest: /home/{{ ansible_user_id }}/couchbase-cxx-client
+        version: 1.0.6
+
+    ## Uncomment to apply ad-hoc or emergency patch to the source repository
+
+    # - name: Fix RPM scripts
+    #   block:
+    #     - name: Download patch
+    #       get_url:
+    #         url: https://github.com/couchbase/couchbase-cxx-client/pull/{{ pr }}.diff
+    #         dest: /home/{{ ansible_user_id }}/{{ pr }}.diff
+    #
+    #     - name: Apply patch
+    #       command: git apply /home/{{ ansible_user_id }}/{{ pr }}.diff
+    #       args:
+    #         chdir: /home/{{ ansible_user_id }}/couchbase-cxx-client
+
+    - name: Create build directory
+      file:
+        path: /home/{{ ansible_user_id }}/couchbase-cxx-client/build
+        state: directory
+
+    - name: Configure build with CMake
+      command: >
+        cmake -S /home/{{ ansible_user_id }}/couchbase-cxx-client
+              -B /home/{{ ansible_user_id }}/couchbase-cxx-client/build
+              -G Ninja
+              -DCOUCHBASE_CXX_CLIENT_RPM_TARGETS=ON
+              -DCOUCHBASE_CXX_CLIENT_INSTALL=ON
+              -DCOUCHBASE_CXX_CLIENT_BUILD_STATIC=OFF
+      args:
+        chdir: /home/{{ ansible_user_id }}/couchbase-cxx-client
+
+    - name: Build and package RPM
+      command: cmake --build /home/{{ ansible_user_id }}/couchbase-cxx-client/build --target packaging_rpm
+      args:
+        chdir: /home/{{ ansible_user_id }}/couchbase-cxx-client

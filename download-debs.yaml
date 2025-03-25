@@ -1,0 +1,38 @@
+---
+- name: Download all RPMs from remote directory while preserving subdirectories
+  hosts: deb
+  gather_facts: yes
+  tasks:
+    - name: Find all directories in the DEB packaging path
+      find:
+        paths: "/home/{{ ansible_user }}/couchbase-cxx-client/build/packaging/results"
+        file_type: directory
+      register: found_directories
+
+    - name: Archive .rpm files into a tarball for each directory
+      shell: |
+        tar cvf ../../$(basename {{ item.path }}).tar *
+      args:
+        chdir: "{{ item.path }}"
+      loop: "{{ found_directories.files }}"
+      ignore_errors: yes
+
+    - name: Ensure local directory exists for downloading tarballs
+      file:
+        path: "{{ inventory_hostname }}/"
+        state: directory
+      delegate_to: localhost
+
+    - name: Find all tarballs in the packaging path
+      find:
+        paths: "/home/{{ ansible_user }}/couchbase-cxx-client/build/packaging"
+        patterns: "*.tar*"
+      register: found_tarballs
+
+    - name: Download the tarballs from remote to local
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ inventory_hostname }}/"
+        flat: yes
+      loop: "{{ found_tarballs.files }}"
+      when: found_tarballs.matched > 0

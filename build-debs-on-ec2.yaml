@@ -1,0 +1,79 @@
+---
+- name: Setup couchbase-cxx-client DEB packaging environment
+  hosts: deb
+
+  vars:
+    pr: 732
+
+  tasks:
+    - name: Install required packages
+      become: true
+      apt:
+        update_cache: yes
+        name:
+          - ccache
+          - cmake
+          - cowbuilder
+          - debhelper
+          - debian-archive-keyring
+          - doxygen
+          - g++
+          - gcc
+          - git
+          - htop
+          - libssl-dev
+          - mc
+          - ninja-build
+          - pkg-config
+          - plantuml
+          - tree
+          - vim
+        state: present
+
+    - name: Ensure 'set -o vi' is in .bashrc
+      lineinfile:
+        path: /home/{{ ansible_user_id }}/.bashrc
+        line: 'set -o vi'
+        create: yes
+        state: present
+
+    - name: Clone couchbase-cxx-client repository
+      git:
+        repo: https://github.com/couchbase/couchbase-cxx-client
+        dest: /home/{{ ansible_user_id }}/couchbase-cxx-client
+        version: 1.0.6
+
+    ## Uncomment to apply ad-hoc or emergency patch to the source repository
+
+    # - name: Fix DEB scripts
+    #   block:
+    #     - name: Download patch
+    #       get_url:
+    #         url: https://github.com/couchbase/couchbase-cxx-client/pull/{{ pr }}.diff
+    #         dest: /home/{{ ansible_user_id }}/{{ pr }}.diff
+    #
+    #     - name: Apply patch
+    #       command: git apply /home/{{ ansible_user_id }}/{{ pr }}.diff
+    #       args:
+    #         chdir: /home/{{ ansible_user_id }}/couchbase-cxx-client
+
+    - name: Create build directory
+      file:
+        path: /home/{{ ansible_user_id }}/couchbase-cxx-client/build
+        state: directory
+
+    - name: Configure build with CMake
+      command: >
+        cmake -S /home/{{ ansible_user_id }}/couchbase-cxx-client
+              -B /home/{{ ansible_user_id }}/couchbase-cxx-client/build
+              -G Ninja
+              -DCOUCHBASE_CXX_CLIENT_DEB_TARGETS=ON
+              -DCOUCHBASE_CXX_CLIENT_INSTALL=ON
+              -DCOUCHBASE_CXX_CLIENT_BUILD_STATIC=OFF
+      args:
+        chdir: /home/{{ ansible_user_id }}/couchbase-cxx-client
+
+    - name: Build and package DEB
+      command: cmake --build /home/{{ ansible_user_id }}/couchbase-cxx-client/build --target packaging_deb
+      args:
+        chdir: /home/{{ ansible_user_id }}/couchbase-cxx-client

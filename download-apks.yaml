@@ -1,0 +1,43 @@
+---
+- name: Download all APKs from remote directory while preserving subdirectories
+  hosts: alpine
+  gather_facts: yes
+  tasks:
+    - name: Find all directories in the APK packages path
+      find:
+        paths: "/home/{{ ansible_user }}/packages/build"
+        file_type: directory
+      register: found_directories
+
+    - name: Archive .apk files into a tarball for each directory
+      shell: |
+        arch=$(basename $(pwd))
+        build_base=$(basename $(ls -1 *.apk | grep -v 'dev\|tools' | head -1) .apk)
+        tar cvf ../../${build_base}-${arch}-{{ hostvars[inventory_hostname].release }}.tar *.apk
+      args:
+        chdir: "{{ item.path }}"
+        executable: /bin/bash
+      loop: "{{ found_directories.files }}"
+      ignore_errors: yes
+
+    - name: Ensure local directory exists for downloading tarballs
+      file:
+        path: "{{ inventory_hostname }}/"
+        state: directory
+      delegate_to: localhost
+
+    - name: Find all tarballs in the packaging path
+      find:
+        paths:
+          - "/home/{{ ansible_user }}/code/couchbase-cxx-client/build/packaging"
+          - "/home/{{ ansible_user }}/packages"
+        patterns: "*.tar*"
+      register: found_tarballs
+
+    - name: Download the tarballs from remote to local
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ inventory_hostname }}/"
+        flat: yes
+      loop: "{{ found_tarballs.files }}"
+      when: found_tarballs.matched > 0
